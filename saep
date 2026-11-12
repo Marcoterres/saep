@@ -1,0 +1,157 @@
+-- CRIAÇÃO DAS TABELAS
+
+CREATE TABLE colaboradores (
+    id_colaborador SERIAL PRIMARY KEY,
+    nome VARCHAR(100) NOT NULL,
+    email VARCHAR(100) NOT NULL UNIQUE,
+    senha VARCHAR(50) NOT NULL,
+    ativo BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE categorias (
+    id_categoria SERIAL PRIMARY KEY,
+    nome VARCHAR(50) NOT NULL UNIQUE,
+    descricao VARCHAR(200)
+);
+
+CREATE TABLE tarefas (
+    id_tarefa SERIAL PRIMARY KEY,
+    titulo VARCHAR(150) NOT NULL,
+    descricao TEXT,
+    data_criacao TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    prazo_entrega DATE NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'Pendente',
+    id_colaborador INT NOT NULL,
+    id_categoria INT NOT NULL,
+    
+    CONSTRAINT fk_tarefa_colaborador FOREIGN KEY (id_colaborador) REFERENCES colaboradores(id_colaborador),
+    CONSTRAINT fk_tarefa_categoria FOREIGN KEY (id_categoria) REFERENCES categorias(id_categoria),
+    CONSTRAINT chk_status_tarefa CHECK (status IN ('Pendente', 'Em Andamento', 'Concluída'))
+);
+
+CREATE TABLE historico_tarefas (
+    id_historico SERIAL PRIMARY KEY,
+    id_tarefa INT NOT NULL,
+    acao VARCHAR(255) NOT NULL,
+    data_registro TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    CONSTRAINT fk_historico_tarefa FOREIGN KEY (id_tarefa) REFERENCES tarefas(id_tarefa) ON DELETE CASCADE
+);
+
+
+-- TRIGGERS E AUTOMAÇÃO
+
+-- Valida se o colaborador está ativo e preenche a data de criação antes de salvar
+CREATE OR REPLACE FUNCTION fn_validar_dados_tarefa()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_ativo BOOLEAN;
+BEGIN
+    SELECT ativo INTO v_ativo 
+    FROM colaboradores 
+    WHERE id_colaborador = NEW.id_colaborador;
+
+    IF v_ativo IS NULL OR v_ativo = FALSE THEN
+        RAISE EXCEPTION 'Não é possível atribuir tarefas a um colaborador inativo ou inexistente.';
+    END IF;
+
+    NEW.data_criacao := CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_validar_tarefa
+BEFORE INSERT ON tarefas
+FOR EACH ROW
+EXECUTE FUNCTION fn_validar_dados_tarefa();
+
+
+-- Registra o log automático no histórico após a tarefa ser criada
+CREATE OR REPLACE FUNCTION fn_registrar_log_tarefa()
+RETURNS TRIGGER AS $$
+BEGIN
+    INSERT INTO historico_tarefas (id_tarefa, acao, data_registro)
+    VALUES (NEW.id_tarefa, 'Tarefa criada com status: ' || NEW.status, CURRENT_TIMESTAMP);
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_log_criacao_tarefa
+AFTER INSERT ON tarefas
+FOR EACH ROW
+EXECUTE FUNCTION fn_registrar_log_tarefa();
+
+
+-- FUNCTION DE CONSULTA
+
+-- Busca colaboradores por parte do nome ou e-mail
+CREATE OR REPLACE FUNCTION fn_buscar_colaboradores(termo_busca VARCHAR)
+RETURNS TABLE (
+    id INT,
+    nome_colaborador VARCHAR,
+    email_colaborador VARCHAR,
+    status_ativo BOOLEAN
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        id_colaborador, 
+        nome, 
+        email, 
+        ativo
+    FROM colaboradores
+    WHERE nome ILIKE '%' || termo_busca || '%' 
+       OR email ILIKE '%' || termo_busca || '%';
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- MASSA DE DADOS INICIAL
+
+-- Colaboradores (inclui 1 inativo para validar a regra da trigger)
+INSERT INTO colaboradores (nome, email, senha, ativo) VALUES
+('Ana Paula Silva', 'ana.silva@consultoria.com', 'senha123', TRUE),
+('Carlos Eduardo Santos', 'carlos.santos@consultoria.com', 'mudar@2026', TRUE),
+('Mariana Costa', 'mariana.costa@consultoria.com', 'mariana99', TRUE),
+('Roberto Almeida', 'roberto.almeida@consultoria.com', '123456', FALSE);
+
+-- Categorias de tarefas
+INSERT INTO categorias (nome, descricao) VALUES
+('Desenvolvimento', 'Tarefas ligadas à programação e banco de dados'),
+('Infraestrutura', 'Manutenção de servidores, redes e cloud'),
+('Gestão e Reuniões', 'Alinhamento com clientes e cronogramas');
+
+-- Tarefas iniciais (disparam as triggers e geram o histórico automaticamente)
+INSERT INTO tarefas (titulo, descricao, prazo_entrega, status, id_colaborador, id_categoria) VALUES
+('Modelar Banco de Dados', 'Criar DER e script SQL do sistema novo', '2026-11-20', 'Em Andamento', 1, 1),
+('Configurar Servidor PostgreSQL', 'Instalar SGBD e liberar portas no firewall', '2026-11-25', 'Pendente', 2, 2),
+('Reunião de Kickoff com Cliente', 'Apresentar escopo inicial do projeto', '2026-11-15', 'Concluída', 3, 3),
+('Revisar Políticas de Backup', 'Testar restauração automática diária', '2026-11-30', 'Pendente', 2, 2);
+
+
+-- VIEWS DE RELATÓRIO E PAINEL
+
+-- Visão geral para a tela inicial do sistema
+CREATE OR REPLACE VIEW vw_painel_principal AS
+SELECT 
+    c.nome AS colaborador,
+    t.titulo AS tarefa,
+    cat.nome AS categoria,
+    t.prazo_entrega,
+    t.status
+FROM tarefas t
+JOIN colaboradores c ON t.id_colaborador = c.id_colaborador
+JOIN categorias cat ON t.id_categoria = cat.id_categoria;
+
+-- Visão ordenada por urgência de prazo e cálculo de dias restantes
+CREATE OR REPLACE VIEW vw_cronograma_prazos AS
+SELECT 
+    t.titulo AS tarefa,
+    t.prazo_entrega,
+    (t.prazo_entrega - CURRENT_DATE) AS dias_restantes,
+    t.status,
+    c.nome AS responsavel
+FROM tarefas t
+JOIN colaboradores c ON t.id_colaborador = c.id_colaborador
+ORDER BY t.prazo_entrega ASC;
